@@ -1,457 +1,185 @@
-# ============================================
-# HOUSE PRICE PREDICTION - VERJNAKAN KOD
-# ============================================
-
-import warnings
-warnings.filterwarnings("ignore")
-
-import os
-import json
-import joblib
-import numpy as np
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
+import joblib
+import tensorflow as tf
 
-from sklearn.model_selection import train_test_split, RandomizedSearchCV, learning_curve, KFold
-from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
-from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import OneHotEncoder, StandardScaler, FunctionTransformer
-from sklearn.metrics import mean_squared_error, r2_score, make_scorer
-from sklearn.compose import TransformedTargetRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, r2_score
 
-from sklearn.linear_model import Ridge, Lasso, ElasticNet
-from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor, GradientBoostingRegressor
-from sklearn.ensemble import HistGradientBoostingRegressor
+# =========================
+# 1. ЗАГРУЗКА ДАННЫХ
+# =========================
+df = pd.read_csv("Housing.csv")
 
-# --------------------------------------------
-# 1) 
-DATA_PATH = "Housing.csv"
-
-if not os.path.exists(DATA_PATH):
-    raise FileNotFoundError(
-        f"{DATA_PATH} file@ chi gtnvel. "
-        f"Nerberi kaggle-ic Housing.csv u dnir ays script-i het nuyn papkayi mej."
-    )
-
-df = pd.read_csv(DATA_PATH)
-
-print("=== Skzbnakan data ===")
+print("Первые 5 строк:")
 print(df.head())
-print("\nShape:", df.shape)
-print("\nColumns:", list(df.columns))
 
-# --------------------------------------------
-# 2) PREPROCESS / CLEANING
-# --------------------------------------------
-# column anunneri maqrum
-df.columns = [col.strip().lower() for col in df.columns]
+# =========================
+# 2. PREPROCESSING
+# =========================
 
-# duplicates hanel
-before_dups = len(df)
-df = df.drop_duplicates().reset_index(drop=True)
-after_dups = len(df)
-
-print("\n=== Duplicate maqrum ===")
-print("Hanel en", before_dups - after_dups, "duplicate tox")
-
-# target checking
-target_col = "price"
-if target_col not in df.columns:
-    raise ValueError("price syunaky chi gtnvel dataset-um")
-
-# text value-neri standardizacia
-for col in df.select_dtypes(include="object").columns:
-    df[col] = df[col].astype(str).str.strip().str.lower()
+# убираем дубликаты
+df = df.drop_duplicates()
 
 # yes/no -> 1/0
-yes_no_cols = ["mainroad", "guestroom", "basement", "hotwaterheating", "airconditioning", "prefarea"]
-for col in yes_no_cols:
-    if col in df.columns:
-        df[col] = df[col].map({"yes": 1, "no": 0})
+binary_cols = [
+    "mainroad",
+    "guestroom",
+    "basement",
+    "hotwaterheating",
+    "airconditioning",
+    "prefarea"
+]
 
-# numeric syunakneri veratsum numeric
-for col in df.columns:
-    if col != "furnishingstatus":
-        df[col] = pd.to_numeric(df[col], errors="ignore")
+for col in binary_cols:
+    df[col] = df[col].map({"yes": 1, "no": 0})
 
-# missing value-neri tvyal
-print("\n=== Missing values ===")
-print(df.isnull().sum())
+# категориальный столбец furnishingstatus превращаем в dummy-переменные
+df = pd.get_dummies(df, columns=["furnishingstatus"], drop_first=True)
 
-# optional outlier clipping (IQR method)
-def clip_outliers_iqr(dataframe, cols):
-    df_copy = dataframe.copy()
-    for c in cols:
-        q1 = df_copy[c].quantile(0.25)
-        q3 = df_copy[c].quantile(0.75)
-        iqr = q3 - q1
-        lower = q1 - 1.5 * iqr
-        upper = q3 + 1.5 * iqr
-        df_copy[c] = df_copy[c].clip(lower, upper)
-    return df_copy
+# признаки и целевая переменная
+X = df.drop("price", axis=1)
+y = df["price"]
 
-numeric_cols_all = [c for c in df.columns if c != "furnishingstatus"]
-numeric_cols_all = [c for c in numeric_cols_all if pd.api.types.is_numeric_dtype(df[c])]
-
-# target-i vray outlier clipping chenq anum
-feature_numeric_cols = [c for c in numeric_cols_all if c != target_col]
-df = clip_outliers_iqr(df, feature_numeric_cols)
-
-print("\n=== Data info heto preprocessing ===")
-print(df.info())
-
-# --------------------------------------------
-# 3) FEATURE / TARGET BAJANUM
-# --------------------------------------------
-X = df.drop(columns=[target_col])
-y = df[target_col].copy()
-
-categorical_features = [c for c in X.columns if X[c].dtype == "object"]
-numeric_features = [c for c in X.columns if c not in categorical_features]
-
-print("\nNumeric features:", numeric_features)
-print("Categorical features:", categorical_features)
-
-# --------------------------------------------
-# 4) TRAIN / VALIDATION / TEST SPLIT
-# --------------------------------------------
-# arajin split: train_val + test
-X_train_val, X_test, y_train_val, y_test = train_test_split(
-    X, y, test_size=0.15, random_state=42
+# =========================
+# 3. SPLIT
+# =========================
+# сначала train+temp и test
+X_train_full, X_test, y_train_full, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
 )
 
-# erkrord split: train + valid
+# потом train и validation
 X_train, X_val, y_train, y_val = train_test_split(
-    X_train_val, y_train_val, test_size=0.1765, random_state=42
-)
-# 0.85 * 0.1765 ~ 0.15 => stacvum e motavor 70/15/15
-
-print("\n=== Split chaper ===")
-print("Train:", X_train.shape, y_train.shape)
-print("Validation:", X_val.shape, y_val.shape)
-print("Test:", X_test.shape, y_test.shape)
-
-# --------------------------------------------
-# 5) PREPROCESSOR
-# --------------------------------------------
-numeric_transformer_scaled = Pipeline(steps=[
-    ("imputer", SimpleImputer(strategy="median")),
-    ("scaler", StandardScaler())
-])
-
-numeric_transformer_tree = Pipeline(steps=[
-    ("imputer", SimpleImputer(strategy="median"))
-])
-
-categorical_transformer = Pipeline(steps=[
-    ("imputer", SimpleImputer(strategy="most_frequent")),
-    ("onehot", OneHotEncoder(handle_unknown="ignore"))
-])
-
-# --------------------------------------------
-# 6) METRICNER
-# --------------------------------------------
-def rmse_func(y_true, y_pred):
-    return np.sqrt(mean_squared_error(y_true, y_pred))
-
-rmse_scorer = make_scorer(rmse_func, greater_is_better=False)
-
-def evaluate_model(model, X_data, y_data, dataset_name="Set"):
-    preds = model.predict(X_data)
-    rmse = rmse_func(y_data, preds)
-    r2 = r2_score(y_data, preds)
-    print(f"{dataset_name} RMSE: {rmse:.4f}")
-    print(f"{dataset_name} R²:   {r2:.4f}")
-    return rmse, r2, preds
-
-# --------------------------------------------
-# 7) MODELNER + SEARCH SPACE
-# --------------------------------------------
-models_config = {
-    "Ridge": {
-        "preprocessor": ColumnTransformer(transformers=[
-            ("num", numeric_transformer_scaled, numeric_features),
-            ("cat", categorical_transformer, categorical_features)
-        ]),
-        "model": Ridge(random_state=42),
-        "params": {
-            "regressor__model__alpha": np.logspace(-3, 3, 30)
-        }
-    },
-
-    "Lasso": {
-        "preprocessor": ColumnTransformer(transformers=[
-            ("num", numeric_transformer_scaled, numeric_features),
-            ("cat", categorical_transformer, categorical_features)
-        ]),
-        "model": Lasso(random_state=42, max_iter=10000),
-        "params": {
-            "regressor__model__alpha": np.logspace(-4, 1, 30)
-        }
-    },
-
-    "ElasticNet": {
-        "preprocessor": ColumnTransformer(transformers=[
-            ("num", numeric_transformer_scaled, numeric_features),
-            ("cat", categorical_transformer, categorical_features)
-        ]),
-        "model": ElasticNet(random_state=42, max_iter=10000),
-        "params": {
-            "regressor__model__alpha": np.logspace(-4, 1, 30),
-            "regressor__model__l1_ratio": np.linspace(0.1, 0.9, 9)
-        }
-    },
-
-    "RandomForest": {
-        "preprocessor": ColumnTransformer(transformers=[
-            ("num", numeric_transformer_tree, numeric_features),
-            ("cat", categorical_transformer, categorical_features)
-        ]),
-        "model": RandomForestRegressor(random_state=42, n_jobs=-1),
-        "params": {
-            "regressor__model__n_estimators": [100, 200, 300, 500],
-            "regressor__model__max_depth": [None, 5, 10, 15, 20],
-            "regressor__model__min_samples_split": [2, 5, 10],
-            "regressor__model__min_samples_leaf": [1, 2, 4],
-            "regressor__model__max_features": ["sqrt", "log2", None]
-        }
-    },
-
-    "ExtraTrees": {
-        "preprocessor": ColumnTransformer(transformers=[
-            ("num", numeric_transformer_tree, numeric_features),
-            ("cat", categorical_transformer, categorical_features)
-        ]),
-        "model": ExtraTreesRegressor(random_state=42, n_jobs=-1),
-        "params": {
-            "regressor__model__n_estimators": [100, 200, 300, 500],
-            "regressor__model__max_depth": [None, 5, 10, 15, 20],
-            "regressor__model__min_samples_split": [2, 5, 10],
-            "regressor__model__min_samples_leaf": [1, 2, 4],
-            "regressor__model__max_features": ["sqrt", "log2", None]
-        }
-    },
-
-    "GradientBoosting": {
-        "preprocessor": ColumnTransformer(transformers=[
-            ("num", numeric_transformer_tree, numeric_features),
-            ("cat", categorical_transformer, categorical_features)
-        ]),
-        "model": GradientBoostingRegressor(random_state=42),
-        "params": {
-            "regressor__model__n_estimators": [100, 200, 300],
-            "regressor__model__learning_rate": [0.01, 0.03, 0.05, 0.1],
-            "regressor__model__max_depth": [2, 3, 4, 5],
-            "regressor__model__subsample": [0.7, 0.8, 0.9, 1.0],
-            "regressor__model__min_samples_split": [2, 5, 10]
-        }
-    },
-
-    "HistGradientBoosting": {
-        "preprocessor": ColumnTransformer(transformers=[
-            ("num", numeric_transformer_tree, numeric_features),
-            ("cat", categorical_transformer, categorical_features)
-        ]),
-        "model": HistGradientBoostingRegressor(random_state=42),
-        "params": {
-            "regressor__model__learning_rate": [0.01, 0.03, 0.05, 0.1],
-            "regressor__model__max_iter": [100, 200, 300, 500],
-            "regressor__model__max_depth": [None, 3, 5, 7, 10],
-            "regressor__model__min_samples_leaf": [10, 20, 30],
-            "regressor__model__l2_regularization": [0.0, 0.01, 0.1, 1.0]
-        }
-    }
-}
-
-# --------------------------------------------
-# 8) SEARCH FUNCTION
-# --------------------------------------------
-cv = KFold(n_splits=5, shuffle=True, random_state=42)
-
-results = []
-best_name = None
-best_search = None
-best_score = np.inf
-
-for model_name, cfg in models_config.items():
-    print("\n" + "=" * 60)
-    print(f"Model: {model_name}")
-
-    pipeline = Pipeline(steps=[
-        ("preprocessor", cfg["preprocessor"]),
-        ("model", cfg["model"])
-    ])
-
-    # target-i hamar log transform
-    wrapped_model = TransformedTargetRegressor(
-        regressor=pipeline,
-        func=np.log1p,
-        inverse_func=np.expm1
-    )
-
-    search = RandomizedSearchCV(
-        estimator=wrapped_model,
-        param_distributions=cfg["params"],
-        n_iter=20,
-        scoring=rmse_scorer,
-        cv=cv,
-        random_state=42,
-        n_jobs=-1,
-        verbose=0
-    )
-
-    search.fit(X_train, y_train)
-
-    best_cv_rmse = -search.best_score_
-    print(f"Best CV RMSE: {best_cv_rmse:.4f}")
-    print("Best params:")
-    print(search.best_params_)
-
-    val_rmse, val_r2, _ = evaluate_model(search.best_estimator_, X_val, y_val, dataset_name="Validation")
-
-    results.append({
-        "model": model_name,
-        "cv_rmse": best_cv_rmse,
-        "val_rmse": val_rmse,
-        "val_r2": val_r2,
-        "best_params": search.best_params_
-    })
-
-    if val_rmse < best_score:
-        best_score = val_rmse
-        best_name = model_name
-        best_search = search
-
-# --------------------------------------------
-# 9) RESULTNERI TABLE
-# --------------------------------------------
-results_df = pd.DataFrame(results).sort_values(by="val_rmse").reset_index(drop=True)
-
-print("\n" + "=" * 60)
-print("AMENALAV MODELY:", best_name)
-print("\nBolor modelneri hamematutyun:")
-print(results_df[["model", "cv_rmse", "val_rmse", "val_r2"]])
-
-# --------------------------------------------
-# 10) FINAL FIT (TRAIN+VAL)
-# --------------------------------------------
-best_model = best_search.best_estimator_
-best_model.fit(X_train_val, y_train_val)
-
-print("\n=== Final evaluation ===")
-train_rmse, train_r2, train_preds = evaluate_model(best_model, X_train_val, y_train_val, dataset_name="Train+Val")
-test_rmse, test_r2, test_preds = evaluate_model(best_model, X_test, y_test, dataset_name="Test")
-
-# --------------------------------------------
-# 11) GRAFIKNER
-# --------------------------------------------
-# A) Actual vs Predicted
-plt.figure(figsize=(8, 6))
-plt.scatter(y_test, test_preds, alpha=0.7)
-plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()])
-plt.xlabel("Iravakan giny")
-plt.ylabel("Kanxatesvac giny")
-plt.title(f"Actual vs Predicted ({best_name})")
-plt.tight_layout()
-plt.savefig("actual_vs_predicted.png", dpi=200)
-plt.show()
-
-# B) Residuals
-residuals = y_test - test_preds
-plt.figure(figsize=(8, 6))
-plt.scatter(test_preds, residuals, alpha=0.7)
-plt.axhline(0, linestyle="--")
-plt.xlabel("Kanxatesvac giny")
-plt.ylabel("Residual")
-plt.title(f"Residual plot ({best_name})")
-plt.tight_layout()
-plt.savefig("residual_plot.png", dpi=200)
-plt.show()
-
-# C) Learning curve (train/validation metric)
-train_sizes, train_scores, val_scores = learning_curve(
-    estimator=best_model,
-    X=X_train_val,
-    y=y_train_val,
-    cv=cv,
-    scoring=rmse_scorer,
-    train_sizes=np.linspace(0.1, 1.0, 8),
-    n_jobs=-1,
-    shuffle=True,
-    random_state=42
+    X_train_full, y_train_full, test_size=0.2, random_state=42
 )
 
-train_scores_mean = -np.mean(train_scores, axis=1)
-val_scores_mean = -np.mean(val_scores, axis=1)
+# =========================
+# 4. SCALE
+# =========================
+scaler = StandardScaler()
 
-plt.figure(figsize=(8, 6))
-plt.plot(train_sizes, train_scores_mean, marker="o", label="Train RMSE")
-plt.plot(train_sizes, val_scores_mean, marker="o", label="Validation RMSE")
-plt.xlabel("Train size")
-plt.ylabel("RMSE")
-plt.title(f"Learning Curve ({best_name})")
+X_train = scaler.fit_transform(X_train)
+X_val = scaler.transform(X_val)
+X_test = scaler.transform(X_test)
+
+# =========================
+# 5. ФУНКЦИЯ СОЗДАНИЯ МОДЕЛИ
+# =========================
+def build_model(layers):
+    model = tf.keras.Sequential()
+
+    # первый скрытый слой
+    model.add(tf.keras.layers.Dense(layers[0], activation="relu", input_shape=(X_train.shape[1],)))
+
+    # остальные скрытые слои
+    for units in layers[1:]:
+        model.add(tf.keras.layers.Dense(units, activation="relu"))
+
+    # выходной слой
+    model.add(tf.keras.layers.Dense(1))
+
+    model.compile(
+        optimizer="adam",
+        loss="mse"
+    )
+
+    return model
+
+# =========================
+# 6. НЕСКОЛЬКО ПРОСТЫХ АРХИТЕКТУР
+# =========================
+architectures = [
+    [32, 16],
+    [64, 32],
+    [128, 64, 32]
+]
+
+best_model = None
+best_history = None
+best_architecture = None
+best_rmse = float("inf")
+
+for arch in architectures:
+    print(f"\nПробуем архитектуру: {arch}")
+
+    model = build_model(arch)
+
+    early_stop = tf.keras.callbacks.EarlyStopping(
+        monitor="val_loss",
+        patience=10,
+        restore_best_weights=True
+    )
+
+    history = model.fit(
+        X_train, y_train,
+        validation_data=(X_val, y_val),
+        epochs=100,
+        batch_size=16,
+        verbose=0,
+        callbacks=[early_stop]
+    )
+
+    y_val_pred = model.predict(X_val, verbose=0).flatten()
+    rmse = np.sqrt(mean_squared_error(y_val, y_val_pred))
+    r2 = r2_score(y_val, y_val_pred)
+
+    print("Validation RMSE:", rmse)
+    print("Validation R2:", r2)
+
+    if rmse < best_rmse:
+        best_rmse = rmse
+        best_model = model
+        best_history = history
+        best_architecture = arch
+
+print("\nЛучшая архитектура:", best_architecture)
+print("Лучший validation RMSE:", best_rmse)
+
+# =========================
+# 7. ОЦЕНКА НА TEST
+# =========================
+y_test_pred = best_model.predict(X_test, verbose=0).flatten()
+
+rmse_test = np.sqrt(mean_squared_error(y_test, y_test_pred))
+r2_test = r2_score(y_test, y_test_pred)
+
+print("\nРезультаты на test:")
+print("RMSE =", rmse_test)
+print("R2 =", r2_test)
+
+# =========================
+# 8. ГРАФИК TRAIN / VALIDATION LOSS
+# =========================
+plt.figure(figsize=(8, 5))
+plt.plot(best_history.history["loss"], label="Train Loss")
+plt.plot(best_history.history["val_loss"], label="Validation Loss")
+plt.title("Train / Validation Loss")
+plt.xlabel("Epoch")
+plt.ylabel("Loss")
 plt.legend()
-plt.tight_layout()
-plt.savefig("learning_curve_rmse.png", dpi=200)
+plt.grid(True)
 plt.show()
 
-# D) Bar chart model comparison
-plt.figure(figsize=(10, 6))
-plt.bar(results_df["model"], results_df["val_rmse"])
-plt.xticks(rotation=45)
-plt.ylabel("Validation RMSE")
-plt.title("Model comparison by Validation RMSE")
-plt.tight_layout()
-plt.savefig("model_comparison.png", dpi=200)
-plt.show()
+# =========================
+# 9. СОХРАНЕНИЕ МОДЕЛИ И SCALER
+# =========================
+best_model.save("house_price_model.keras")
+joblib.dump(scaler, "scaler.pkl")
 
-# --------------------------------------------
-# 12) MODEL SAVE
-# --------------------------------------------
-joblib.dump(best_model, "best_house_price_model.joblib")
-results_df.to_csv("model_comparison_results.csv", index=False)
+print("\nМодель сохранена в house_price_model.keras")
+print("Scaler сохранён в scaler.pkl")
 
-report = {
-    "best_model_name": best_name,
-    "train_val_rmse": float(train_rmse),
-    "train_val_r2": float(train_r2),
-    "test_rmse": float(test_rmse),
-    "test_r2": float(test_r2),
-    "best_params": {k: str(v) for k, v in best_search.best_params_.items()}
-}
+# =========================
+# 10. ПРИМЕР ЗАГРУЗКИ И INFERENCE
+# =========================
+loaded_model = tf.keras.models.load_model("house_price_model.keras")
+loaded_scaler = joblib.load("scaler.pkl")
 
-with open("final_report.json", "w", encoding="utf-8") as f:
-    json.dump(report, f, ensure_ascii=False, indent=4)
+sample = X.iloc[[0]]
+sample_scaled = loaded_scaler.transform(sample)
 
-print("\nModely pahpanel e:")
-print("- best_house_price_model.joblib")
-print("- model_comparison_results.csv")
-print("- final_report.json")
-print("- actual_vs_predicted.png")
-print("- residual_plot.png")
-print("- learning_curve_rmse.png")
-print("- model_comparison.png")
-
-# --------------------------------------------
-# 13) MODEL LOAD + INFERENCE EXAMPLE
-# --------------------------------------------
-loaded_model = joblib.load("best_house_price_model.joblib")
-
-sample_input = pd.DataFrame([{
-    "area": 7420,
-    "bedrooms": 4,
-    "bathrooms": 2,
-    "stories": 3,
-    "mainroad": 1,
-    "guestroom": 0,
-    "basement": 0,
-    "hotwaterheating": 0,
-    "airconditioning": 1,
-    "parking": 2,
-    "prefarea": 1,
-    "furnishingstatus": "furnished"
-}])
-
-sample_prediction = loaded_model.predict(sample_input)[0]
-print(f"\nOrinak kanxatesvac house price = {sample_prediction:.2f}")
+prediction = loaded_model.predict(sample_scaled, verbose=0)
+print("\nПример предсказания:", prediction[0][0])
