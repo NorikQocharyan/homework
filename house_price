@@ -25,9 +25,7 @@ from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor, Gradien
 from sklearn.ensemble import HistGradientBoostingRegressor
 
 # --------------------------------------------
-# 1) DATASET-I BERNUM
-# --------------------------------------------
-# Aystegh poxir file-i anuny ete petq e
+# 1) 
 DATA_PATH = "Housing.csv"
 
 if not os.path.exists(DATA_PATH):
